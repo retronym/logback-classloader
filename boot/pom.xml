@@ -166,6 +166,29 @@
               </arguments>
             </configuration>
           </execution>
+
+          <!--
+            Self-attach mode: agent loaded dynamically at runtime via Attach API.
+            No -javaagent on command line needed.  Useful for hot-attach and
+            tooling scenarios.
+            Run with: mvn exec:exec@self-attach -pl boot
+          -->
+          <execution>
+            <id>self-attach</id>
+            <goals><goal>exec</goal></goals>
+            <configuration>
+              <executable>java</executable>
+              <arguments>
+                <argument>-cp</argument>
+                <argument>${project.build.outputDirectory}:${project.basedir}/../agent/target/agent-1.0-SNAPSHOT.jar</argument>
+                <argument>com.example.boot.SelfAttachBootMain</argument>
+                <argument>${project.build.directory}/sdk-cp.txt</argument>
+                <argument>${project.build.directory}/runtime-cp.txt</argument>
+                <argument>${project.build.directory}/app-cp.txt</argument>
+                <argument>${project.basedir}/../agent/target/agent-1.0-SNAPSHOT.jar</argument>
+              </arguments>
+            </configuration>
+          </execution>
         </executions>
         <!-- Default for mvn exec:exec -pl boot (forked JVM) -->
         <configuration>
