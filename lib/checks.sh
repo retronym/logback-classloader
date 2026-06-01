@@ -30,7 +30,7 @@ check_output() {
         echo "   Cause   : Loader.loadClass uses SDK/system CL for class"
         echo "             instantiation; runtime.jar is invisible from there."
         echo "             ConsoleAppender starts without an encoder → fallback."
-        ((failed++))
+        failed=$((failed + 1))
     fi
 
     # ── Check 2: logback-app.xml <include> was resolved ──────────────────
@@ -50,7 +50,7 @@ check_output() {
         echo "   Cause   : Joran's <include resource> uses SDK/system CL to"
         echo "             locate resources; logback-app.xml in app.jar is"
         echo "             invisible.  optional=\"true\" hides the failure."
-        ((failed++))
+        failed=$((failed + 1))
     fi
 
     # ── Check 3: No logback configuration errors ─────────────────────────
@@ -65,7 +65,7 @@ check_output() {
         echo "$errors" | sed 's/^/      /'
         echo "   Cause   : Classes referenced in logback.xml (Layout, Filter)"
         echo "             could not be loaded from the CL logback used."
-        ((failed++))
+        failed=$((failed + 1))
     fi
 
     echo "════════════════════════════════════════════════════════════"
