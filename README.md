@@ -219,6 +219,24 @@ mvn install && mvn exec:exec@embedded -pl boot
 
 ---
 
+## Other approaches (brainstormed, not all implemented)
+
+The two implemented solutions cover the main modes.  Several other viable
+approaches exist, ordered roughly by elegance:
+
+| # | Idea | Agent? | CL restructure? | Embedded? |
+|---|---|:---:|:---:|:---:|
+| **A** | **Custom `Configurator` SPI + `JoranConfigurator` subclass** in `sdk.jar` — register via `META-INF/services`, override `buildModelInterpretationContext()` to inject a CL.  Pure logback extension point, zero infrastructure. | ✗ | ✗ | ✓ |
+| **B** | **`LoggerContext` subclass loaded by `appCL`** — `getClassLoaderOfObject(context)` then returns `appCL`, which sees everything.  Elegant root-cause fix; needs a stub class in `app.jar` and a custom `ContextSelector`. | ✗ | ✗ | ✓ |
+| **C** | **Classpath-shadow `Loader`** — put a replacement `ch.qos.logback.core.util.Loader` in `sdk.jar` before `logback-core.jar` in the URL list.  Same effect as the agent but delivered via classpath ordering. | ✗ | ✗ | partial |
+| **D** | **Move logback into Runtime CL** — restructure so logback is a runtime concern, not SDK.  Solves problems 1 & 2; problem 3 still needs TCCL set to `appCL`. | ✗ | ✓ | ✗ |
+| **E** | **Two-phase reconfiguration** — let `BasicConfigurator` run, then after building the full hierarchy call `ctx.stop()` / `JoranConfigurator.doConfigure(appCL.getResource("logback.xml"))` / `ctx.start()`.  No infrastructure, brief window of default formatting at startup. | ✗ | ✗ | ✓ |
+| **[F]** | **`-Djava.system.class.loader=AkkaSystemClassLoader`** — replace the JVM system CL itself with a custom one that adds downward child-search.  In embedded mode the system CL literally IS the shared CL; no sidecar bridge needed.  Tried in [`solution/system-classloader`](../../tree/solution/system-classloader). | ✗ | ✓ | ✓ (perfectly) |
+| **G** | **Bootstrap-CL Loader replacement** — `appendToBootstrapClassLoaderSearch` with a single-class jar containing a replacement `ch.qos.logback.core.util.Loader`.  Same as Solution 2 without ASM — no visitor pattern, just a compiled Java file. | premain | ✗ | ✓ |
+| **H** | **Lazy self-attach agent** — BootMain attaches to itself at runtime via the Attach API, loads the agent dynamically.  No `-javaagent` on the command line; useful for tooling and hot-reload dev flows. | runtime | ✗ | ✓ |
+
+---
+
 ## Comparison
 
 | | Solution 1 | Solution 2 |
