@@ -1,0 +1,37 @@
+<!--
+  Master logback configuration — lives in runtime.jar (Runtime ClassLoader).
+
+  Classloader challenges embedded here:
+
+  1. <filter class="...ThresholdRangeFilter"> and
+     <layout class="...CorrelationIdLayout">
+     These classes are in runtime.jar.  Logback (in SDK CL) instantiates
+     them via Class.forName using the Joran interpreter's classloader, which
+     falls back to TCCL.  BootMain sets TCCL = App CL before class loading
+     begins; App CL delegates to Runtime CL, so the classes are found.
+
+  2. <include resource="logback-app.xml">
+     This resource lives in app.jar (App CL).  Logback resolves resources
+     via TCCL.  With TCCL = App CL the include succeeds.  With TCCL = SDK CL
+     it silently fails (optional="true" suppresses the error).
+
+  Toggle debug="true" to see logback's own class-loading trace.
+-->
+<configuration debug="true">
+
+  <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+    <filter class="com.example.runtime.filter.ThresholdRangeFilter">
+      <minLevel>TRACE</minLevel>
+      <maxLevel>ERROR</maxLevel>
+    </filter>
+    <layout class="com.example.runtime.layout.CorrelationIdLayout"/>
+  </appender>
+
+  <!-- App fragment — resource must be visible to TCCL at config time. -->
+  <include resource="logback-app.xml" optional="true"/>
+
+  <root level="INFO">
+    <appender-ref ref="CONSOLE"/>
+  </root>
+
+</configuration>

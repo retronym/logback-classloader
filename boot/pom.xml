@@ -1,0 +1,154 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>com.example</groupId>
+    <artifactId>logback-classloader</artifactId>
+    <version>1.0-SNAPSHOT</version>
+  </parent>
+
+  <artifactId>boot</artifactId>
+
+  <!--
+    BOOT has no compile-scope deps — BootMain uses only standard Java APIs.
+
+    The three siblings are declared `provided` (with transitive exclusions for
+    runtime/app) solely to:
+      a) fix the Maven reactor build order (boot builds last), and
+      b) let maven-dependency-plugin resolve their artifact paths and
+         transitive deps for classpath-file generation.
+
+    Layered classpath file strategy:
+      sdk-cp.txt    = sdk.jar + logback + slf4j transitive  (SDK layer)
+      runtime-cp.txt = runtime.jar only                     (Runtime layer)
+      app-cp.txt    = app.jar only                          (App layer)
+  -->
+  <dependencies>
+    <dependency>
+      <groupId>com.example</groupId>
+      <artifactId>sdk</artifactId>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>com.example</groupId>
+      <artifactId>runtime</artifactId>
+      <scope>provided</scope>
+      <!-- Exclude transitives: runtime deps are already covered by sdk-cp.txt -->
+      <exclusions>
+        <exclusion><groupId>*</groupId><artifactId>*</artifactId></exclusion>
+      </exclusions>
+    </dependency>
+    <dependency>
+      <groupId>com.example</groupId>
+      <artifactId>app</artifactId>
+      <scope>provided</scope>
+      <exclusions>
+        <exclusion><groupId>*</groupId><artifactId>*</artifactId></exclusion>
+      </exclusions>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-dependency-plugin</artifactId>
+        <executions>
+
+          <!-- SDK layer: sdk.jar + all logback/slf4j transitive deps -->
+          <execution>
+            <id>sdk-classpath</id>
+            <phase>package</phase>
+            <goals><goal>build-classpath</goal></goals>
+            <configuration>
+              <outputFile>${project.build.directory}/sdk-cp.txt</outputFile>
+              <includeScope>provided</includeScope>
+              <excludeArtifactIds>runtime,app</excludeArtifactIds>
+            </configuration>
+          </execution>
+
+          <!-- Runtime layer: runtime.jar only -->
+          <execution>
+            <id>runtime-classpath</id>
+            <phase>package</phase>
+            <goals><goal>build-classpath</goal></goals>
+            <configuration>
+              <outputFile>${project.build.directory}/runtime-cp.txt</outputFile>
+              <includeScope>provided</includeScope>
+              <includeArtifactIds>runtime</includeArtifactIds>
+            </configuration>
+          </execution>
+
+          <!-- App layer: app.jar only -->
+          <execution>
+            <id>app-classpath</id>
+            <phase>package</phase>
+            <goals><goal>build-classpath</goal></goals>
+            <configuration>
+              <outputFile>${project.build.directory}/app-cp.txt</outputFile>
+              <includeScope>provided</includeScope>
+              <includeArtifactIds>app</includeArtifactIds>
+            </configuration>
+          </execution>
+
+        </executions>
+      </plugin>
+
+      <plugin>
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>exec-maven-plugin</artifactId>
+        <!--
+          Two ways to run:
+
+          mvn exec:exec -pl boot
+            Forks a fresh JVM — clean TCCL, full logback status output.
+            Use this for diagnosing classloader / logback init issues.
+
+          mvn exec:java -pl boot
+            Runs in-process inside Maven's JVM.  Fast iteration but TCCL
+            may be polluted by Maven itself; logback status output is
+            sometimes swallowed.
+
+          Both are configured here via separate <execution> blocks so the
+          id=default-cli conflict (applies to whichever goal is invoked) is
+          avoided by giving each a goal-specific id that Maven will not match
+          unless you use @id syntax. The <configuration> at plugin level is
+          the fallback for exec:exec via direct CLI invocation.
+        -->
+        <executions>
+          <!-- mvn exec:java@in-process -pl boot -->
+          <execution>
+            <id>in-process</id>
+            <goals><goal>java</goal></goals>
+            <configuration>
+              <mainClass>com.example.boot.BootMain</mainClass>
+              <classpathScope>compile</classpathScope>
+              <arguments>
+                <argument>${project.build.directory}/sdk-cp.txt</argument>
+                <argument>${project.build.directory}/runtime-cp.txt</argument>
+                <argument>${project.build.directory}/app-cp.txt</argument>
+              </arguments>
+            </configuration>
+          </execution>
+        </executions>
+        <!-- Default for mvn exec:exec -pl boot (forked JVM) -->
+        <configuration>
+          <executable>java</executable>
+          <arguments>
+            <argument>-cp</argument>
+            <argument>${project.build.outputDirectory}</argument>
+            <argument>com.example.boot.BootMain</argument>
+            <argument>${project.build.directory}/sdk-cp.txt</argument>
+            <argument>${project.build.directory}/runtime-cp.txt</argument>
+            <argument>${project.build.directory}/app-cp.txt</argument>
+          </arguments>
+        </configuration>
+      </plugin>
+
+    </plugins>
+  </build>
+</project>

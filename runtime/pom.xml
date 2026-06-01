@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>com.example</groupId>
+    <artifactId>logback-classloader</artifactId>
+    <version>1.0-SNAPSHOT</version>
+  </parent>
+
+  <artifactId>runtime</artifactId>
+
+  <!--
+    RUNTIME layer: implementation of the SDK, the master logback.xml, and
+    custom Layout/Filter types that are referenced by FQN in logback.xml.
+
+    At runtime this jar lands in the Runtime ClassLoader (child of SDK CL).
+    The classloader challenge: logback lives in SDK CL but needs to
+    instantiate com.example.runtime.layout.* and .filter.* — which are only
+    visible in this child CL.  See BootMain for the TCCL-based workaround.
+  -->
+  <dependencies>
+    <dependency>
+      <groupId>com.example</groupId>
+      <artifactId>sdk</artifactId>
+    </dependency>
+  </dependencies>
+</project>

@@ -1,0 +1,12 @@
+<!--
+  App-specific logback fragment.  Included by runtime's logback.xml via:
+    <include resource="logback-app.xml" optional="true"/>
+
+  This file lives in app.jar (App ClassLoader).  For logback to find it,
+  the TCCL must be App CL (or a child of it) at configuration time.
+  The DEBUG log line in MyServiceEndpoint is the indicator: if it appears,
+  the include worked; if not, TCCL was wrong when logback configured itself.
+-->
+<included>
+  <logger name="com.example.app" level="DEBUG"/>
+</included>
