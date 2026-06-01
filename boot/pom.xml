@@ -134,6 +134,28 @@
               </arguments>
             </configuration>
           </execution>
+
+          <!--
+            System-CL mode: replaces the JVM system classloader itself.
+            No agent, no bridge registry — the system CL IS the bridge.
+            Run with: mvn exec:exec@system-cl -pl boot
+          -->
+          <execution>
+            <id>system-cl</id>
+            <goals><goal>exec</goal></goals>
+            <configuration>
+              <executable>java</executable>
+              <arguments>
+                <argument>-Djava.system.class.loader=com.example.boot.AkkaSystemClassLoader</argument>
+                <argument>-cp</argument>
+                <argument>${project.build.outputDirectory}</argument>
+                <argument>com.example.boot.SystemCLBootMain</argument>
+                <argument>${project.build.directory}/sdk-cp.txt</argument>
+                <argument>${project.build.directory}/runtime-cp.txt</argument>
+                <argument>${project.build.directory}/app-cp.txt</argument>
+              </arguments>
+            </configuration>
+          </execution>
         </executions>
         <!-- Default for mvn exec:exec -pl boot (forked JVM) -->
         <configuration>
