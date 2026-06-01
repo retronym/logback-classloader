@@ -49,6 +49,16 @@
         <exclusion><groupId>*</groupId><artifactId>*</artifactId></exclusion>
       </exclusions>
     </dependency>
+    <!--
+      agent: compile-scope so EmbeddedBootMain can reference LogbackBridge.
+      The agent JAR is also used as -javaagent in the embedded exec.
+    -->
+    <dependency>
+      <groupId>com.example</groupId>
+      <artifactId>agent</artifactId>
+      <version>${project.version}</version>
+      <scope>compile</scope>
+    </dependency>
   </dependencies>
 
   <build>
@@ -128,6 +138,28 @@
               <mainClass>com.example.boot.BootMain</mainClass>
               <classpathScope>compile</classpathScope>
               <arguments>
+                <argument>${project.build.directory}/sdk-cp.txt</argument>
+                <argument>${project.build.directory}/runtime-cp.txt</argument>
+                <argument>${project.build.directory}/app-cp.txt</argument>
+              </arguments>
+            </configuration>
+          </execution>
+
+          <!--
+            Embedded mode: simulates SDK+App on a shared CL, Runtime isolated.
+            The Java agent rewrites Loader.getClassLoaderOfObject() in-flight.
+            Run with: mvn exec:exec@embedded -pl boot
+          -->
+          <execution>
+            <id>embedded</id>
+            <goals><goal>exec</goal></goals>
+            <configuration>
+              <executable>java</executable>
+              <arguments>
+                <argument>-javaagent:${project.basedir}/../agent/target/agent-1.0-SNAPSHOT.jar</argument>
+                <argument>-cp</argument>
+                <argument>${project.build.outputDirectory}:${project.basedir}/../agent/target/agent-1.0-SNAPSHOT.jar</argument>
+                <argument>com.example.boot.EmbeddedBootMain</argument>
                 <argument>${project.build.directory}/sdk-cp.txt</argument>
                 <argument>${project.build.directory}/runtime-cp.txt</argument>
                 <argument>${project.build.directory}/app-cp.txt</argument>

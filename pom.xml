@@ -13,6 +13,7 @@
     <module>sdk</module>
     <module>runtime</module>
     <module>app</module>
+    <module>agent</module>
     <module>boot</module>
   </modules>
 
