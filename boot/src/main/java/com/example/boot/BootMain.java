@@ -7,55 +7,30 @@ import java.net.URL;
 import java.net.URLClassLoader;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
 
 /**
- * Reads three classpath files produced by Maven and constructs a layered
- * classloader hierarchy that mirrors the Akka Runtime isolation model:
+ * Constructs a layered classloader hierarchy and launches RuntimeMain.
  *
  * <pre>
- *   PlatformClassLoader  (JVM bootstrap + java.*)
- *        └── SDK ClassLoader      sdk.jar + logback-classic + slf4j-api + ...
- *             └── Runtime ClassLoader   runtime.jar
- *                  └── App ClassLoader       app.jar
+ *   PlatformCL
+ *     └── LogbackClassLoader  logback-classic + logback-core + slf4j-api
+ *          │  ↕ (downward search with anti-loop ThreadLocal guard)
+ *          └── SDK CL          sdk.jar
+ *               └── Runtime CL  runtime.jar  (Layout, Filter, logback.xml)
+ *                    └── App CL  app.jar      (logback-app.xml, ServiceEndpoint)
  * </pre>
  *
- * ┌─────────────────────────────────────────────────────────────────────────┐
- * │  LOGBACK CLASSLOADER CHALLENGES (logback 1.5.x / SLF4J 2.x)           │
- * ├─────────────────────────────────────────────────────────────────────────┤
- * │                                                                         │
- * │  CHALLENGE 1 — logback.xml discovery                                   │
- * │    DefaultJoranConfigurator.performMultiStepConfigurationFileSearch     │
- * │    calls Loader.getClassLoaderOfObject(this) which returns              │
- * │    DefaultJoranConfigurator.class.getClassLoader() = SDK CL.           │
- * │    logback.xml lives in runtime.jar (Runtime CL).  SDK CL cannot see   │
- * │    it → DefaultJoranConfigurator returns INVOKE_NEXT_IF_ANY →          │
- * │    BasicConfigurator runs (default DEBUG root, TTLLLayout).            │
- * │    There is NO TCCL fallback in performMultiStepConfigurationFileSearch.│
- * │                                                                         │
- * │    FIX: set system property "logback.configurationFile" to the URL     │
- * │    resolved via appCL BEFORE logback is first initialised.             │
- * │                                                                         │
- * │  CHALLENGE 2 — Layout / Filter class instantiation                     │
- * │    Joran's Loader.loadClass(className, context) first tries            │
- * │    context.getClass().getClassLoader() (= SDK CL) → ClassNotFound,    │
- * │    then falls back to getTCL() (= TCCL = appCL) →                     │
- * │    delegates to runtimeCL → CorrelationIdLayout found ✓               │
- * │    TCCL must be appCL at logback config time; see setContextClassLoader │
- * │    call below.                                                          │
- * │                                                                         │
- * │  CHALLENGE 3 — <include resource="logback-app.xml">                   │
- * │    Joran resolves included resources via Loader.getResource(name, cl)  │
- * │    where cl = DefaultJoranConfigurator.class.getClassLoader() (SDK CL).│
- * │    logback-app.xml lives in app.jar → NOT found from SDK CL.          │
- * │    FIX: implement a custom Configurator (SDK-visible via SPI) that     │
- * │    drives JoranConfigurator with appCL, OR override the classloader    │
- * │    used by the Joran context.  Left as an exercise to explore next.    │
- * │                                                                         │
- * │  Observable outcomes to verify fixes:                                  │
- * │    - log format shows CorrelationIdLayout   => CHALLENGE 2 solved      │
- * │    - "[DEBUG]" line from MyServiceEndpoint  => CHALLENGE 3 solved      │
- * │    - logback status messages appear (debug="true" in logback.xml)      │
- * └─────────────────────────────────────────────────────────────────────────┘
+ * The LogbackClassLoader is the crux of the solution.  Because all logback
+ * and Joran classes are loaded by it, every CL lookup that logback makes
+ * (config file, Layout class, Filter class, included resource) is intercepted
+ * at the LogbackClassLoader.  When its own jars don't have the answer it
+ * reaches down into App CL (which covers the full child hierarchy via normal
+ * parent delegation) — with a ThreadLocal guard preventing re-entrant loops.
+ *
+ * No system properties, no TCCL manipulation, no reflection-based hacks needed.
  */
 public class BootMain {
 
@@ -69,15 +44,37 @@ public class BootMain {
         URL[] runtimeUrls = readClasspathFile(args[1]);
         URL[] appUrls     = readClasspathFile(args[2]);
 
-        System.out.println("=== Layered ClassLoader Setup ===");
-        printUrls("SDK     ", sdkUrls);
-        printUrls("Runtime ", runtimeUrls);
-        printUrls("App     ", appUrls);
+        // ── Split SDK classpath into logback layer vs SDK-only ───────────────
+        // sdk-cp.txt contains sdk.jar + logback-classic + logback-core + slf4j-api.
+        // We hoist logback/slf4j into their own parent CL (Layer 0) so that every
+        // class and resource lookup logback performs goes through LogbackClassLoader.
+        List<URL> logbackLayerUrls = new ArrayList<>();
+        List<URL> sdkOnlyUrls     = new ArrayList<>();
+        for (URL url : sdkUrls) {
+            String filename = Path.of(url.toURI()).getFileName().toString().toLowerCase();
+            if (filename.startsWith("logback") || filename.startsWith("slf4j")) {
+                logbackLayerUrls.add(url);
+            } else {
+                sdkOnlyUrls.add(url);
+            }
+        }
 
-        // --- Build the classloader hierarchy ---
+        System.out.println("=== Layered ClassLoader Setup ===");
+        printUrls("Logback ", logbackLayerUrls);
+        printUrls("SDK     ", sdkOnlyUrls);
+        printUrls("Runtime ", Arrays.asList(runtimeUrls));
+        printUrls("App     ", Arrays.asList(appUrls));
+
+        // ── Build the hierarchy ───────────────────────────────────────────────
+
+        LogbackClassLoader logbackCL = new LogbackClassLoader(
+                logbackLayerUrls.toArray(new URL[0]),
+                ClassLoader.getPlatformClassLoader());
 
         URLClassLoader sdkCL = new URLClassLoader(
-                "sdk-classloader", sdkUrls, ClassLoader.getPlatformClassLoader());
+                "sdk-classloader",
+                sdkOnlyUrls.toArray(new URL[0]),
+                logbackCL);
 
         URLClassLoader runtimeCL = new URLClassLoader(
                 "runtime-classloader", runtimeUrls, sdkCL);
@@ -85,43 +82,30 @@ public class BootMain {
         URLClassLoader appCL = new URLClassLoader(
                 "app-classloader", appUrls, runtimeCL);
 
-        System.out.println("\n[CL] " + sdkCL);
+        // Inject appCL as the downward-search target.
+        // appCL covers the full child hierarchy:
+        //   appCL.loadClass/getResource → runtimeCL → sdkCL → logbackCL (guard active)
+        logbackCL.addChild(appCL);
+
+        System.out.println("\n[CL] " + logbackCL + "  (downward → appCL)");
+        System.out.println("[CL] " + sdkCL);
         System.out.println("[CL] " + runtimeCL);
         System.out.println("[CL] " + appCL);
 
-        // Diagnostic: confirm resources are (or are not) reachable from each CL.
-        System.out.println("\n=== Resource visibility ===");
-        probeResource(sdkCL,     "sdk    ", "logback.xml");
-        probeResource(runtimeCL, "runtime", "logback.xml");
-        probeResource(appCL,     "app    ", "logback.xml");
-        probeResource(appCL,     "app    ", "logback-app.xml");
-        probeResource(sdkCL,     "sdk    ", "com/example/runtime/layout/CorrelationIdLayout.class");
-        probeResource(appCL,     "app    ", "com/example/runtime/layout/CorrelationIdLayout.class");
+        // Resource visibility sanity check
+        System.out.println("\n=== Resource visibility via LogbackClassLoader ===");
+        probeResource(logbackCL, "logback.xml");
+        probeResource(logbackCL, "logback-app.xml");
+        probeResource(logbackCL, "com/example/runtime/layout/CorrelationIdLayout.class");
 
         System.out.println();
 
-        // ── FIX for CHALLENGE 1 ───────────────────────────────────────────────
-        // logback 1.5.x DefaultJoranConfigurator finds logback.xml using its own
-        // classloader (SDK CL), not TCCL.  SDK CL has no logback.xml.
-        // Solution: point logback at the URL we know appCL can resolve.
-        URL logbackXmlUrl = appCL.getResource("logback.xml");
-        if (logbackXmlUrl != null) {
-            System.setProperty("logback.configurationFile", logbackXmlUrl.toString());
-            System.out.println("[Boot] logback.configurationFile => " + logbackXmlUrl);
-        } else {
-            System.err.println("[Boot] WARNING: logback.xml not found via appCL — BasicConfigurator will be used");
-        }
-
-        // ── FIX for CHALLENGE 2 (prerequisite) ───────────────────────────────
-        // Joran's Loader.loadClass falls back to TCCL when SDK CL cannot load a
-        // class (e.g. CorrelationIdLayout).  TCCL must be appCL so the delegation
-        // chain (appCL → runtimeCL → runtime.jar) reaches the Layout/Filter.
+        // Set TCCL for application code (ServiceLoader etc.) — not needed by logback.
         Thread.currentThread().setContextClassLoader(appCL);
 
-        // ── Load and invoke RuntimeMain via reflection ─────────────────────────
-        // RuntimeMain's static Logger field triggers logback init on class load.
-        // By now: logback.configurationFile is set ✓, TCCL = appCL ✓.
-        System.out.println();
+        // Load RuntimeMain — its static Logger field boots logback.
+        // No system properties or TCCL tricks needed: LogbackClassLoader intercepts
+        // everything logback asks for.
         Class<?> runtimeMainClass = runtimeCL.loadClass("com.example.runtime.RuntimeMain");
         System.out.println("[Boot] RuntimeMain loaded by: " + runtimeMainClass.getClassLoader());
         System.out.println();
@@ -130,16 +114,14 @@ public class BootMain {
         run.invoke(null, appCL);
     }
 
-    // ---------------------------------------------------------------------------
+    // ── Helpers ──────────────────────────────────────────────────────────────
 
     private static URL[] readClasspathFile(String filePath) throws Exception {
         String cp = Files.readString(Path.of(filePath)).trim();
         if (cp.isEmpty()) return new URL[0];
         String[] entries = cp.split(File.pathSeparator);
         URL[] urls = new URL[entries.length];
-        for (int i = 0; i < entries.length; i++) {
-            urls[i] = toUrl(entries[i].trim());
-        }
+        for (int i = 0; i < entries.length; i++) urls[i] = toUrl(entries[i].trim());
         return urls;
     }
 
@@ -147,16 +129,14 @@ public class BootMain {
         return new File(path).toURI().toURL();
     }
 
-    private static void printUrls(String label, URL[] urls) {
+    private static void printUrls(String label, List<URL> urls) {
         System.out.printf("[CP] %s:", label);
         for (URL u : urls) System.out.printf("%n         %s", u);
         System.out.println();
     }
 
-    private static void probeResource(URLClassLoader cl, String label, String resource) {
-        URL found      = cl.findResource(resource);   // own jars only
-        URL delegated  = cl.getResource(resource);    // full parent chain
-        System.out.printf("[RES] %-8s own=%-5s delegated=%-5s  %s%n",
-                label, found != null ? "YES" : "NO", delegated != null ? "YES" : "NO", resource);
+    private static void probeResource(ClassLoader cl, String resource) {
+        URL url = cl.getResource(resource);
+        System.out.printf("[RES] %-60s → %s%n", resource, url != null ? url : "NOT FOUND");
     }
 }
