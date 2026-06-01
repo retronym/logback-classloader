@@ -17,7 +17,7 @@
 
   Toggle debug="true" to see logback's own class-loading trace.
 -->
-<configuration debug="true">
+<configuration debug="false">
 
   <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
     <filter class="com.example.runtime.filter.ThresholdRangeFilter">
