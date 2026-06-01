@@ -230,7 +230,7 @@ Or for true embedded (sdk+app on the real system classpath from the start):
 | **D** | **Move logback into Runtime CL** — restructure so logback is a runtime concern not SDK.  Solves problems 1 & 2; problem 3 still needs TCCL = `appCL` for `<include resource>`. | ✗ | ✓ | ✗ |
 | **E** | **Two-phase reconfiguration** — let `BasicConfigurator` run, then `ctx.stop()` / `JoranConfigurator.doConfigure(appCL.getResource("logback.xml"))` / `ctx.start()`.  No infrastructure; brief window of default formatting at startup. | ✗ | ✗ | ✓ |
 | **G** | **Bootstrap-CL Loader replacement** — `appendToBootstrapClassLoaderSearch` with a single-class jar shadowing `ch.qos.logback.core.util.Loader`.  Same result as Solution 2 but no ASM — just a compiled Java file. | premain | ✗ | ✓ |
-| **[H]** | **Self-attach agent via Instrumentation API** — BootMain dynamically loads the agent at runtime via `VirtualMachine.attach(pid)`, without `-javaagent` on the command line.  Agent patches logback like Solution 2.  Implemented in [`solution/self-attach`](../../tree/solution/self-attach); note: requires JVM config (`-XX:+EnableDynamicAgentLoading`) or special modes to overcome attach security restrictions. | runtime | ✗ | ✓ |
+| **[H]** | **Self-attach agent via Instrumentation API** — BootMain dynamically loads the agent at runtime via `VirtualMachine.attach(pid)`, without `-javaagent` on the command line.  Agent patches logback like Solution 2.  Implemented in [`solution/self-attach`](../../tree/solution/self-attach); requires `-Djdk.attach.allowAttachSelf` JVM flag to enable self-attach. | runtime | ✗ | ✓ |
 
 ---
 
@@ -243,7 +243,7 @@ Or for true embedded (sdk+app on the real system classpath from the start):
 | **Infrastructure** | None | ASM + agent JAR | None | ASM + agent JAR |
 | **Logback version sensitivity** | Robust | Tied to `Loader.getClassLoaderOfObject` signature | Robust | Tied to `Loader.getClassLoaderOfObject` signature |
 | **CL topology change** | Yes — inserts Layer 0 | No | Yes — replaces system CL | No |
-| **Requires config** | ✗ | JVM flag `-javaagent` | JVM flag `-Djava.system.class.loader` | JVM flag `-XX:+EnableDynamicAgentLoading` |
+| **Requires config** | ✗ | JVM flag `-javaagent` | JVM flag `-Djava.system.class.loader` | JVM flag `-Djdk.attach.allowAttachSelf` |
 | **Key classes** | `LogbackClassLoader` | `LoaderTransformer`, `BridgeClassLoader` | `AkkaSystemClassLoader` | `SelfAttachBootMain`, `LogbackBridge` |
 | **Runtime overhead** | Zero | Zero | Zero | Zero |
 
@@ -304,17 +304,15 @@ vm.loadAgent(agentJarPath);
 Once attached, the agent patches `Loader.getClassLoaderOfObject()` exactly like
 Solution 2, and the bridge classloader handles downward child search.
 
-**Attach API limitation**: Self-attach to the currently running JVM requires
-explicit JVM configuration (`-XX:+EnableDynamicAgentLoading` on Java 9+) or
-special execution modes (debugging, jshell, etc.). Standard production JVM
-configs reject self-attach as a security measure.
+**Self-attach requirement**: Java by default forbids a process to attach to
+itself as a security measure.  Enable it with `-Djdk.attach.allowAttachSelf`
+on the Java command line (this is the standard, documented way to allow
+self-attach on all Java versions).
 
 Run: `git checkout solution/self-attach && mvn install && ./run-self-attach.sh`
 
-The script will complete the class hierarchy setup and log output, but the
-attach itself will fail with "Can not attach to current VM" unless you enable
-dynamic agent loading.  To make it work, add `-XX:+EnableDynamicAgentLoading`
-to the Java command in `run-self-attach.sh`.
+The script includes `-Djdk.attach.allowAttachSelf` in the Java invocation,
+so self-attach works out of the box.
 
 ### Toggling logback's own diagnostic output
 
