@@ -301,18 +301,30 @@ VirtualMachine vm = VirtualMachine.attach(pid);
 vm.loadAgent(agentJarPath);
 ```
 
-Once attached, the agent patches `Loader.getClassLoaderOfObject()` exactly like
-Solution 2, and the bridge classloader handles downward child search.
+Once `vm.loadAgent()` returns the agent has:
+1. Appended the agent JAR to the bootstrap CL (`LogbackBridge` now visible everywhere)
+2. Registered `LoaderTransformer` — patches `Loader.getClassLoaderOfObject()` with the same 5-instruction prologue as Solution 2
+3. **Eagerly retransformed `Loader` if it was already loaded** — `Can-Retransform-Classes: true` in the MANIFEST allows this; `agentmain` calls `inst.retransformClasses()` if `Loader` is on the classpath from a prior import
 
-**Self-attach requirement**: Java by default forbids a process to attach to
+Then `SelfAttachBootMain` constructs the same sidecar CL topology as Solution 2:
+
+```
+PlatformCL
+  └── SharedCL   logback + SDK + App
+       └── RuntimeCL   runtime.jar
+
+BridgeClassLoader (sidecar — returned by patched getClassLoaderOfObject)
+  parent = SharedCL,  child = RuntimeCL
+```
+
+`LogbackBridge.register(bridge)` is called before `RuntimeMain` is loaded, so logback's first use of `getClassLoaderOfObject` already sees the bridge.
+
+**Self-attach requirement**: Java by default forbids a process from attaching to
 itself as a security measure.  Enable it with `-Djdk.attach.allowAttachSelf`
-on the Java command line (this is the standard, documented way to allow
-self-attach on all Java versions).
+(standard on all Java versions).  The `run-self-attach.sh` script includes this
+flag, so the solution works out of the box.
 
 Run: `git checkout solution/self-attach && mvn install && ./run-self-attach.sh`
-
-The script includes `-Djdk.attach.allowAttachSelf` in the Java invocation,
-so self-attach works out of the box.
 
 ### Toggling logback's own diagnostic output
 
