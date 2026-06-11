@@ -220,6 +220,82 @@ Or for true embedded (sdk+app on the real system classpath from the start):
 
 ---
 
+## Solution I — Supplier hooks + XML driven by the Runtime layer
+
+**Branch: [`solution/supplier-hooks`](../../tree/solution/supplier-hooks)** · requires **logback ≥ 1.5.13**
+
+> No agent, no custom CL, no system-CL replacement, no TCCL juggling.
+> Inverts control: instead of logback **pulling** class names out of XML across
+> the CL boundary, the Runtime layer **pushes** what's needed, then lets ordinary
+> Joran/XML config run.
+
+logback 1.5.13+ ([qos-ch/logback@be0b5e0](https://github.com/qos-ch/logback/commit/be0b5e027487c351a0f006c2b695a7a3fcd4918d),
+[@49f0638](https://github.com/qos-ch/logback/commit/49f0638512cb1fc51f634ef4f972d25d34a9565b))
+changed pattern-converter registration from `Map<String, String>` (class names)
+to `Map<String, Supplier<DynamicConverter>>`. A `Supplier` can be a **constructor
+reference**, so logback's `Compiler` just calls `supplier.get()` — **no
+`Class.forName`, no `Loader.loadClass`, no classloader at all**.
+
+`SupplierBasedLogbackConfig.configure(appCL)` (in `runtime.jar`, which holds
+direct references to its own classes) does two things, then hands control to
+plain Joran:
+
+```java
+// 1. Register the custom conversion word as a SUPPLIER (not a class name).
+Map<String, Supplier<DynamicConverter>> rules = new HashMap<>();
+rules.put("correlationId", CorrelationIdConverter::new);
+ctx.putObject(CoreConstants.PATTERN_RULE_REGISTRY_FOR_SUPPLIERS, rules);
+
+// 2. Publish the app fragment's URL (resolved via appCL, not logback's CL).
+ctx.putProperty("appFragmentUrl", appCL.getResource("logback-app.xml").toExternalForm());
+
+// 3. Run the master logback.xml as ordinary XML (doConfigure does NOT reset,
+//    so the supplier + property set above survive into the XML pass).
+JoranConfigurator jc = new JoranConfigurator();
+jc.setContext(ctx);
+jc.doConfigure(appCL.getResource("logback.xml"));
+```
+
+The master `logback.xml` is then plain XML, with **no FQN class references**:
+
+```xml
+<appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+  <encoder>
+    <pattern>[%d{HH:mm:ss.SSS}] [%correlationId] [%-5level] [%logger] %msg%n</pattern>
+  </encoder>
+</appender>
+<include url="${appFragmentUrl}" optional="true"/>   <!-- url=, not resource= -->
+<root level="INFO"><appender-ref ref="CONSOLE"/></root>
+```
+
+How each original problem is dispatched **without touching the classloader graph**:
+
+| Problem | Mechanism |
+|---|---|
+| **1 — `logback.xml` discovery** | The Runtime layer resolves the URL itself (`appCL.getResource`) and passes it to `doConfigure(url)`. logback never has to *find* the file. |
+| **2 — Layout class instantiation** | The custom Layout is re-expressed as a `%correlationId` **converter** and registered as `CorrelationIdConverter::new`. `supplier.get()` runs the constructor directly. |
+| **3 — `<include resource>` resolution** | Rewritten as `<include url="${appFragmentUrl}">`. logback opens it with `new URL(...)`, bypassing `Loader.getResourceBySelfClassLoader`. The include handler aliases the fragment's `<included>` root to `<configuration>`. |
+
+**The boundary of the approach** — the custom `ThresholdRangeFilter`. A *filter*
+is not a converter, and logback has **no supplier registry for filters**;
+`<filter class="...">` would resolve the class via `instantiateByClassName(…, context)`
+→ the `LoggerContext`'s (SDK) CL, with no TCCL fallback. So the filter cannot be
+named in XML across the CL boundary and is attached programmatically afterwards
+(`console.addFilter(new ThresholdRangeFilter())`).
+
+> **Thread-safety caveat.** Do **not** register via
+> `PatternLayout.DEFAULT_CONVERTER_SUPPLIER_MAP.put(...)`: that field is a plain
+> `static HashMap`, and `PatternLayoutBase.getEffectiveConverterMap()` reads it
+> with `putAll` under no lock — a concurrent configuration races the runtime
+> mutation. Publish into the **context** registry instead
+> (`PATTERN_RULE_REGISTRY_FOR_SUPPLIERS`); the context object map is a
+> `ConcurrentHashMap`. Discipline: build the inner map fully, publish once, never
+> mutate it again.
+
+Run: `git checkout solution/supplier-hooks && ./run.sh`
+
+---
+
 ## Other approaches (brainstormed, not yet implemented)
 
 | # | Idea | Agent? | CL restructure? | Embedded? |
@@ -236,16 +312,17 @@ Or for true embedded (sdk+app on the real system classpath from the start):
 
 ## Comparison
 
-| | Solution 1 | Solution 2 | Solution F | Solution H |
-|---|---|---|---|---|
-| **Mechanism** | Custom Layer 0 parent CL | Agent bytecode rewrite + sidecar CL | Replace system CL | Dynamic agent attach + sidecar CL |
-| **Embedded mode** | ✗ can't wrap system CL | ✓ | ✓ | ✓ |
-| **Infrastructure** | None | ASM + agent JAR | None | ASM + agent JAR |
-| **Logback version sensitivity** | Robust | Tied to `Loader.getClassLoaderOfObject` signature | Robust | Tied to `Loader.getClassLoaderOfObject` signature |
-| **CL topology change** | Yes — inserts Layer 0 | No | Yes — replaces system CL | No |
-| **Requires config** | ✗ | JVM flag `-javaagent` | JVM flag `-Djava.system.class.loader` | JVM flag `-Djdk.attach.allowAttachSelf` |
-| **Key classes** | `LogbackClassLoader` | `LoaderTransformer`, `BridgeClassLoader` | `AkkaSystemClassLoader` | `SelfAttachBootMain`, `LogbackBridge` |
-| **Runtime overhead** | Zero | Zero | Zero | Zero |
+| | Solution 1 | Solution 2 | Solution F | Solution H | Solution I |
+|---|---|---|---|---|---|
+| **Mechanism** | Custom Layer 0 parent CL | Agent bytecode rewrite + sidecar CL | Replace system CL | Dynamic agent attach + sidecar CL | Supplier hook + self-resolved XML |
+| **Embedded mode** | ✗ can't wrap system CL | ✓ | ✓ | ✓ | ✓ |
+| **Infrastructure** | None | ASM + agent JAR | None | ASM + agent JAR | None |
+| **Logback version sensitivity** | Robust | Tied to `Loader.getClassLoaderOfObject` signature | Robust | Tied to `Loader.getClassLoaderOfObject` signature | Needs ≥ 1.5.13 supplier API |
+| **CL topology change** | Yes — inserts Layer 0 | No | Yes — replaces system CL | No | No |
+| **Requires config** | ✗ | JVM flag `-javaagent` | JVM flag `-Djava.system.class.loader` | JVM flag `-Djdk.attach.allowAttachSelf` | ✗ |
+| **Key classes** | `LogbackClassLoader` | `LoaderTransformer`, `BridgeClassLoader` | `AkkaSystemClassLoader` | `SelfAttachBootMain`, `LogbackBridge` | `SupplierBasedLogbackConfig`, `CorrelationIdConverter` |
+| **Runtime overhead** | Zero | Zero | Zero | Zero | Zero |
+| **Caveat** | Needs CL control | Bytecode tooling | Owns system CL | Bytecode tooling | Custom filter stays programmatic |
 
 All three solutions share the same **downward child-search + `ThreadLocal`
 anti-loop pattern**: `IN_DOWNWARD_SEARCH` prevents the re-entrant cycle that
@@ -281,6 +358,10 @@ mvn install && mvn exec:exec@system-cl -pl boot
 # Solution H — Self-attach agent (dynamic agent loading):
 git checkout solution/self-attach
 mvn install && ./run-self-attach.sh
+
+# Solution I — Supplier hook + self-resolved XML (no agent, no custom CL):
+git checkout solution/supplier-hooks
+./run.sh
 ```
 
 ---
