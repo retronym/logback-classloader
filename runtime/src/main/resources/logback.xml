@@ -4,10 +4,13 @@
   Solution I (supplier hooks) drives this file as XML *after* the Runtime layer
   has already done two things programmatically:
 
-  1. Registered the custom conversion word as a Supplier<DynamicConverter>
-     (CorrelationIdConverter::new) in the context's PATTERN_RULE_REGISTRY_FOR_SUPPLIERS.
-     => The %correlationId below resolves via supplier.get(); logback never
-        loads a runtime class by name, so there is no cross-CL Class.forName.
+  1. Registered every custom conversionRule as a Supplier<DynamicConverter>
+     (CorrelationIdConverter::new, RewriteMessageConverter::new,
+     RewriteLoggerConverter::new) in PATTERN_RULE_REGISTRY_FOR_SUPPLIERS.
+     => The %correlationId / %rewriteMsg / %rewriteLogger words below resolve
+        via supplier.get(); logback never loads a runtime class by name, so
+        there is no cross-CL Class.forName. (No <conversionRule> needed, and no
+        document-order constraint — the words exist before this appender starts.)
 
   2. Published the app fragment's URL (resolved via appCL) as the
      ${appFragmentUrl} property.
@@ -15,10 +18,11 @@
         Loader.getResourceBySelfClassLoader — so app.jar need not be visible to
         logback's own (SDK) classloader.
 
-  What is NOT here: the custom <filter class="...ThresholdRangeFilter">. A filter
-  is not a converter, and logback has no supplier registry for filters, so a
-  runtime-only filter class still can't be named in XML across the CL boundary.
-  RuntimeMain attaches it programmatically to this appender after configuration.
+  What is NOT here: the custom <filter> and the custom JSON <layout>. Filters and
+  layouts have no supplier registry, so a runtime-only filter/layout class can't
+  be named in XML across the CL boundary. RuntimeMain builds those programmatically
+  after configuration (the ThresholdRangeFilter on CONSOLE, plus a second JSON
+  appender carrying JsonLayout + its nested jsonFormatter and the KafkaLogFilter).
 
   Toggle debug="true" to see logback's own class-loading trace.
 -->
@@ -26,7 +30,8 @@
 
   <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
     <encoder>
-      <pattern>[%d{HH:mm:ss.SSS}] [%correlationId] [%-5level] [%logger] %msg%n</pattern>
+      <!-- %rewriteLogger(...) is a composite converter; %rewriteMsg a simple one. -->
+      <pattern>[%d{HH:mm:ss.SSS}] [%correlationId] [%-5level] [%rewriteLogger(%logger)] %rewriteMsg%n</pattern>
     </encoder>
   </appender>
 

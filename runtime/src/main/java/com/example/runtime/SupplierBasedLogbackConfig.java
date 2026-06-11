@@ -10,19 +10,27 @@ import ch.qos.logback.classic.LoggerContext;
 import ch.qos.logback.classic.joran.JoranConfigurator;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.Appender;
+import ch.qos.logback.core.ConsoleAppender;
 import ch.qos.logback.core.CoreConstants;
+import ch.qos.logback.core.encoder.LayoutWrappingEncoder;
 import ch.qos.logback.core.joran.spi.JoranException;
 import ch.qos.logback.core.pattern.DynamicConverter;
 import ch.qos.logback.core.status.WarnStatus;
 
+import com.example.runtime.filter.KafkaLogFilter;
 import com.example.runtime.filter.ThresholdRangeFilter;
 import com.example.runtime.layout.CorrelationIdConverter;
+import com.example.runtime.layout.DefaultJsonFormatter;
+import com.example.runtime.layout.JsonFormatter;
+import com.example.runtime.layout.JsonLayout;
+import com.example.runtime.layout.RewriteLoggerConverter;
+import com.example.runtime.layout.RewriteMessageConverter;
 
 import org.slf4j.LoggerFactory;
 
 /**
- * Solution I — register the supplier programmatically, then drive the rest of
- * the configuration from XML.
+ * Solution I — register what can't cross the classloader boundary
+ * programmatically, then drive the rest of the configuration from XML.
  *
  * <p>The other solutions in this repo attack the root cause from the pull side:
  * logback (in a parent CL) tries to {@code Class.forName} a class named in
@@ -30,26 +38,31 @@ import org.slf4j.LoggerFactory;
  * classloader graph (custom Layer-0 CL, agent rewrite, system-CL replacement,
  * self-attach) until logback's CL can see downward.</p>
  *
- * <p>Here the Runtime layer does two small things up front, then hands control
- * back to ordinary Joran/XML config:</p>
- * <ol>
- *   <li><b>Registers the custom conversion word as a supplier.</b> The pattern in
- *       {@code logback.xml} uses {@code %correlationId}; we put
- *       {@code CorrelationIdConverter::new} into the context's
- *       {@link CoreConstants#PATTERN_RULE_REGISTRY_FOR_SUPPLIERS}. logback's
- *       {@code Compiler} calls {@code supplier.get()} — no {@code Loader.loadClass},
- *       no TCCL, no CL surgery.</li>
- *   <li><b>Publishes the app fragment URL.</b> We resolve {@code logback-app.xml}
- *       via {@code appCL} and expose it as the {@code ${appFragmentUrl}} property,
- *       so the master's {@code <include url="...">} opens it with {@code new URL(...)}
- *       instead of {@code Loader.getResourceBySelfClassLoader}.</li>
- * </ol>
+ * <p>Here the Runtime layer holds direct references to its own classes, so it
+ * supplies them rather than letting logback resolve them by name. The real
+ * system has three varieties of custom class; each is handled by the mechanism
+ * that fits it:</p>
  *
- * <p>The master {@code logback.xml} (resolved via {@code appCL}) is then run as
- * plain XML. The only thing that cannot live in that XML is the custom
- * {@link ThresholdRangeFilter}: a filter is not a converter and logback has no
- * supplier registry for filters, so a runtime-only filter class still can't be
- * named in XML across the CL boundary. It is attached programmatically afterwards.</p>
+ * <table border="1">
+ *   <caption>How each custom-class variety is configured</caption>
+ *   <tr><th>Variety</th><th>Sandbox class</th><th>Mechanism</th></tr>
+ *   <tr><td>{@code conversionRule} (simple)</td><td>{@link RewriteMessageConverter}</td>
+ *       <td>Supplier hook → usable from the XML pattern as {@code %rewriteMsg}</td></tr>
+ *   <tr><td>{@code conversionRule} (composite)</td><td>{@link RewriteLoggerConverter}</td>
+ *       <td>Supplier hook → {@code %rewriteLogger(%logger)}; compiles a child converter</td></tr>
+ *   <tr><td>custom {@code <layout>} + nested component</td><td>{@link JsonLayout} + {@link JsonFormatter}</td>
+ *       <td>Programmatic — no layout supplier registry exists</td></tr>
+ *   <tr><td>custom {@code <filter>}</td><td>{@link ThresholdRangeFilter}, {@link KafkaLogFilter}</td>
+ *       <td>Programmatic — no filter supplier registry exists</td></tr>
+ * </table>
+ *
+ * <p>Converters are the lucky case: logback 1.5.13+ resolves them through a
+ * {@code Supplier<DynamicConverter>} registry, so a constructor reference avoids
+ * {@code Class.forName} entirely and the words can then be used from ordinary XML
+ * patterns. Layouts and filters have no such registry — {@code <layout class=...>}
+ * / {@code <filter class=...>} would resolve the class via the {@code LoggerContext}'s
+ * (SDK) classloader (no TCCL fallback in 1.5.x) — so those are built with plain
+ * {@code new} here.</p>
  *
  * <h2>Thread-safety note</h2>
  * <p>The tempting one-liner {@code PatternLayout.DEFAULT_CONVERTER_SUPPLIER_MAP.put(...)}
@@ -72,13 +85,18 @@ public final class SupplierBasedLogbackConfig {
         LoggerContext ctx = (LoggerContext) LoggerFactory.getILoggerFactory();
         ctx.reset();
 
-        // ── 1. The supplier hook ──────────────────────────────────────────────
-        // Fill the same registry slot that <conversionRule> populates, but with a
-        // real constructor reference instead of a class-name string. Built fully,
+        // ── 1. Supplier hook: every custom conversionRule, as a constructor ref ──
+        // Fills the same registry slot that <conversionRule> populates, but with
+        // real constructor references instead of class-name strings. Built fully,
         // published once (safe publication via the context's ConcurrentHashMap),
-        // never mutated afterwards. logback.xml's %correlationId resolves here.
+        // never mutated afterwards. logback.xml's pattern words resolve here.
+        // Pre-registering also sidesteps the document-order rule the real config
+        // notes ("conversionRule must precede any appender that uses the word") —
+        // the words exist before any appender starts.
         Map<String, Supplier<DynamicConverter>> rules = new HashMap<>();
-        rules.put("correlationId", CorrelationIdConverter::new);
+        rules.put("correlationId", CorrelationIdConverter::new);   // simple
+        rules.put("rewriteMsg", RewriteMessageConverter::new);     // simple
+        rules.put("rewriteLogger", RewriteLoggerConverter::new);   // composite
         ctx.putObject(CoreConstants.PATTERN_RULE_REGISTRY_FOR_SUPPLIERS, rules);
 
         // ── 2. Publish the app fragment URL for <include url="${appFragmentUrl}"> ─
@@ -106,23 +124,23 @@ public final class SupplierBasedLogbackConfig {
             return;
         }
 
-        // ── 4. Attach the custom filter (no XML path exists for it) ───────────
-        attachRangeFilter(ctx);
+        // ── 4. The varieties with no supplier registry: build them by hand ────
+        Logger root = ctx.getLogger(Logger.ROOT_LOGGER_NAME);
+        attachRangeFilter(ctx, root);   // custom filter on the XML-defined CONSOLE
+        addJsonAppender(ctx, root);     // custom layout (+ nested formatter) + custom filter
     }
 
     /**
      * Attaches the runtime-only {@link ThresholdRangeFilter} to the CONSOLE
-     * appender defined in logback.xml. This is the one piece that cannot be
-     * expressed as {@code <filter class="...">} in XML: a filter is not a
-     * converter, so the supplier hook does not apply, and logback would resolve
-     * the class via its own (SDK) classloader, which cannot see runtime.jar.
+     * appender defined in logback.xml. A filter is not a converter, so the
+     * supplier hook does not apply and {@code <filter class="...">} could not
+     * resolve this class across the CL boundary.
      */
-    private static void attachRangeFilter(LoggerContext ctx) {
-        Logger root = ctx.getLogger(Logger.ROOT_LOGGER_NAME);
+    private static void attachRangeFilter(LoggerContext ctx, Logger root) {
         Appender<ILoggingEvent> console = root.getAppender("CONSOLE");
         if (console == null) {
             ctx.getStatusManager().add(new WarnStatus(
-                    "CONSOLE appender not found; filter not attached", ctx));
+                    "CONSOLE appender not found; range filter not attached", ctx));
             return;
         }
         ThresholdRangeFilter filter = new ThresholdRangeFilter();
@@ -131,5 +149,50 @@ public final class SupplierBasedLogbackConfig {
         filter.setMaxLevel("ERROR");
         filter.start();
         console.addFilter(filter);
+    }
+
+    /**
+     * Builds a second appender that uses the custom {@link JsonLayout} — the
+     * layout variety, complete with its nested {@code jsonFormatter} component
+     * and {@code logOrigin} property — and guards it with the custom
+     * {@link KafkaLogFilter}. Mirrors the real config's:
+     *
+     * <pre>{@code
+     * <layout class="kalix.runtime.LogbackJsonLayout">
+     *   <jsonFormatter class="...JacksonJsonFormatter"/>
+     *   <logOrigin>sdk</logOrigin>
+     * </layout>
+     * <filter class="kalix.runtime.eventing.kafka.KafkaLogFilter"/>
+     * }</pre>
+     *
+     * Neither the layout nor the filter could be named in XML across the CL
+     * boundary, so the whole appender is assembled programmatically.
+     */
+    private static void addJsonAppender(LoggerContext ctx, Logger root) {
+        // Custom layout + its nested component + scalar property (all set by hand).
+        JsonLayout layout = new JsonLayout();
+        layout.setContext(ctx);
+        layout.setJsonFormatter(new DefaultJsonFormatter());
+        layout.setLogOrigin("sdk");
+        layout.start();
+
+        LayoutWrappingEncoder<ILoggingEvent> encoder = new LayoutWrappingEncoder<>();
+        encoder.setContext(ctx);
+        encoder.setLayout(layout);
+        encoder.start();
+
+        ConsoleAppender<ILoggingEvent> jsonAppender = new ConsoleAppender<>();
+        jsonAppender.setContext(ctx);
+        jsonAppender.setName("JSON");
+        jsonAppender.setEncoder(encoder);
+
+        KafkaLogFilter kafkaFilter = new KafkaLogFilter();
+        kafkaFilter.setContext(ctx);
+        kafkaFilter.setDeniedLoggerPrefix("org.apache.kafka");
+        kafkaFilter.start();
+        jsonAppender.addFilter(kafkaFilter);
+
+        jsonAppender.start();
+        root.addAppender(jsonAppender);
     }
 }
