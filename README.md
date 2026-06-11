@@ -241,9 +241,12 @@ direct references to its own classes) does two things, then hands control to
 plain Joran:
 
 ```java
-// 1. Register the custom conversion word as a SUPPLIER (not a class name).
+// 1. Register every custom conversionRule as a SUPPLIER (constructor ref, not a
+//    class name). Simple and composite converters share the same registry.
 Map<String, Supplier<DynamicConverter>> rules = new HashMap<>();
-rules.put("correlationId", CorrelationIdConverter::new);
+rules.put("correlationId", CorrelationIdConverter::new);   // simple
+rules.put("rewriteMsg",    RewriteMessageConverter::new);  // simple
+rules.put("rewriteLogger", RewriteLoggerConverter::new);   // composite
 ctx.putObject(CoreConstants.PATTERN_RULE_REGISTRY_FOR_SUPPLIERS, rules);
 
 // 2. Publish the app fragment's URL (resolved via appCL, not logback's CL).
@@ -254,14 +257,19 @@ ctx.putProperty("appFragmentUrl", appCL.getResource("logback-app.xml").toExterna
 JoranConfigurator jc = new JoranConfigurator();
 jc.setContext(ctx);
 jc.doConfigure(appCL.getResource("logback.xml"));
+
+// 4. Layouts and filters have NO supplier registry — build them by hand.
+//    e.g. a JSON appender carrying a custom JsonLayout (+ nested jsonFormatter,
+//    logOrigin) and a KafkaLogFilter; plus a ThresholdRangeFilter on CONSOLE.
 ```
 
-The master `logback.xml` is then plain XML, with **no FQN class references**:
+The master `logback.xml` is then plain XML, with **no FQN class references** —
+the custom conversion words resolve via the suppliers registered in step 1:
 
 ```xml
 <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
   <encoder>
-    <pattern>[%d{HH:mm:ss.SSS}] [%correlationId] [%-5level] [%logger] %msg%n</pattern>
+    <pattern>[%d{HH:mm:ss.SSS}] [%correlationId] [%-5level] [%rewriteLogger(%logger)] %rewriteMsg%n</pattern>
   </encoder>
 </appender>
 <include url="${appFragmentUrl}" optional="true"/>   <!-- url=, not resource= -->
@@ -276,12 +284,24 @@ How each original problem is dispatched **without touching the classloader graph
 | **2 — Layout class instantiation** | The custom Layout is re-expressed as a `%correlationId` **converter** and registered as `CorrelationIdConverter::new`. `supplier.get()` runs the constructor directly. |
 | **3 — `<include resource>` resolution** | Rewritten as `<include url="${appFragmentUrl}">`. logback opens it with `new URL(...)`, bypassing `Loader.getResourceBySelfClassLoader`. The include handler aliases the fragment's `<included>` root to `<configuration>`. |
 
-**The boundary of the approach** — the custom `ThresholdRangeFilter`. A *filter*
-is not a converter, and logback has **no supplier registry for filters**;
-`<filter class="...">` would resolve the class via `instantiateByClassName(…, context)`
-→ the `LoggerContext`'s (SDK) CL, with no TCCL fallback. So the filter cannot be
-named in XML across the CL boundary and is attached programmatically afterwards
-(`console.addFilter(new ThresholdRangeFilter())`).
+### Exercising every variety of custom class
+
+The real system ships three kinds of custom logback class. The supplier hook
+only covers one of them; the branch demonstrates the right mechanism for each:
+
+| Variety (real class) | Sandbox class | How it's configured |
+|---|---|---|
+| `conversionRule`, simple — `LogbackDevModeRewriteMessage` | `RewriteMessageConverter` (`%rewriteMsg`) | Supplier hook → used straight from the XML pattern |
+| `conversionRule`, composite — `LogbackDevModeRewriteLogger` | `RewriteLoggerConverter` (`%rewriteLogger(%logger)`) | Supplier hook → also covers `Compiler`'s composite path (compiles a child converter) |
+| custom `<layout>` + nested `<jsonFormatter>` + `<logOrigin>` — `LogbackJsonLayout` | `JsonLayout` + `JsonFormatter`/`DefaultJsonFormatter` | **Programmatic** — `new`, then set nested component + property, then `start()`; wired into a second (JSON) appender |
+| custom `<filter>` — `KafkaLogFilter` | `KafkaLogFilter`, `ThresholdRangeFilter` | **Programmatic** — `new` + setters + `start()`, then `appender.addFilter(...)` |
+
+**The boundary of the approach** — only **converters** have a supplier registry.
+A *layout* or *filter* named as `<layout class="...">` / `<filter class="...">`
+would be resolved via `instantiateByClassName(…, context)` → the `LoggerContext`'s
+(SDK) CL, with no TCCL fallback — so a runtime-only layout/filter class can't be
+named in XML across the CL boundary. Those varieties are therefore assembled
+programmatically (with `new`) and attached to their appenders after the XML pass.
 
 > **Thread-safety caveat.** Do **not** register via
 > `PatternLayout.DEFAULT_CONVERTER_SUPPLIER_MAP.put(...)`: that field is a plain
@@ -322,7 +342,7 @@ Run: `git checkout solution/supplier-hooks && ./run.sh`
 | **Requires config** | ✗ | JVM flag `-javaagent` | JVM flag `-Djava.system.class.loader` | JVM flag `-Djdk.attach.allowAttachSelf` | ✗ |
 | **Key classes** | `LogbackClassLoader` | `LoaderTransformer`, `BridgeClassLoader` | `AkkaSystemClassLoader` | `SelfAttachBootMain`, `LogbackBridge` | `SupplierBasedLogbackConfig`, `CorrelationIdConverter` |
 | **Runtime overhead** | Zero | Zero | Zero | Zero | Zero |
-| **Caveat** | Needs CL control | Bytecode tooling | Owns system CL | Bytecode tooling | Custom filter stays programmatic |
+| **Caveat** | Needs CL control | Bytecode tooling | Owns system CL | Bytecode tooling | Layouts & filters stay programmatic |
 
 All three solutions share the same **downward child-search + `ThreadLocal`
 anti-loop pattern**: `IN_DOWNWARD_SEARCH` prevents the re-entrant cycle that
