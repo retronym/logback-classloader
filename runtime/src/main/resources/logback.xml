@@ -1,34 +1,37 @@
 <!--
   Master logback configuration — lives in runtime.jar (Runtime ClassLoader).
 
-  Classloader challenges embedded here:
+  Solution I (supplier hooks) drives this file as XML *after* the Runtime layer
+  has already done two things programmatically:
 
-  1. <filter class="...ThresholdRangeFilter"> and
-     <layout class="...CorrelationIdLayout">
-     These classes are in runtime.jar.  Logback (in SDK CL) instantiates
-     them via Class.forName using the Joran interpreter's classloader, which
-     falls back to TCCL.  BootMain sets TCCL = App CL before class loading
-     begins; App CL delegates to Runtime CL, so the classes are found.
+  1. Registered the custom conversion word as a Supplier<DynamicConverter>
+     (CorrelationIdConverter::new) in the context's PATTERN_RULE_REGISTRY_FOR_SUPPLIERS.
+     => The %correlationId below resolves via supplier.get(); logback never
+        loads a runtime class by name, so there is no cross-CL Class.forName.
 
-  2. <include resource="logback-app.xml">
-     This resource lives in app.jar (App CL).  Logback resolves resources
-     via TCCL.  With TCCL = App CL the include succeeds.  With TCCL = SDK CL
-     it silently fails (optional="true" suppresses the error).
+  2. Published the app fragment's URL (resolved via appCL) as the
+     ${appFragmentUrl} property.
+     => The <include url="..."> below is opened with new URL(...), NOT through
+        Loader.getResourceBySelfClassLoader — so app.jar need not be visible to
+        logback's own (SDK) classloader.
+
+  What is NOT here: the custom <filter class="...ThresholdRangeFilter">. A filter
+  is not a converter, and logback has no supplier registry for filters, so a
+  runtime-only filter class still can't be named in XML across the CL boundary.
+  RuntimeMain attaches it programmatically to this appender after configuration.
 
   Toggle debug="true" to see logback's own class-loading trace.
 -->
-<configuration debug="true">
+<configuration debug="false">
 
   <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
-    <filter class="com.example.runtime.filter.ThresholdRangeFilter">
-      <minLevel>TRACE</minLevel>
-      <maxLevel>ERROR</maxLevel>
-    </filter>
-    <layout class="com.example.runtime.layout.CorrelationIdLayout"/>
+    <encoder>
+      <pattern>[%d{HH:mm:ss.SSS}] [%correlationId] [%-5level] [%logger] %msg%n</pattern>
+    </encoder>
   </appender>
 
-  <!-- App fragment — resource must be visible to TCCL at config time. -->
-  <include resource="logback-app.xml" optional="true"/>
+  <!-- App fragment, included BY URL (resolved by the Runtime layer via appCL). -->
+  <include url="${appFragmentUrl}" optional="true"/>
 
   <root level="INFO">
     <appender-ref ref="CONSOLE"/>

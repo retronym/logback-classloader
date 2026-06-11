@@ -22,6 +22,12 @@ public class RuntimeMain {
     private static final Logger log = LoggerFactory.getLogger(RuntimeMain.class);
 
     public static void run(ClassLoader appCL) {
+        // Solution I: configure logback programmatically from the Runtime layer,
+        // before the first log call. The custom conversion word is registered as
+        // a Supplier (constructor reference), so logback never loads a runtime
+        // class by name across the classloader boundary.
+        SupplierBasedLogbackConfig.configure(appCL);
+
         log.info("RuntimeMain starting");
         log.info("  RuntimeMain loaded by : {}", RuntimeMain.class.getClassLoader());
         log.info("  ILoggerFactory        : {}", LoggerFactory.getILoggerFactory());

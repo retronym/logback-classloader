@@ -100,27 +100,16 @@ public class BootMain {
 
         System.out.println();
 
-        // ── FIX for CHALLENGE 1 ───────────────────────────────────────────────
-        // logback 1.5.x DefaultJoranConfigurator finds logback.xml using its own
-        // classloader (SDK CL), not TCCL.  SDK CL has no logback.xml.
-        // Solution: point logback at the URL we know appCL can resolve.
-        URL logbackXmlUrl = appCL.getResource("logback.xml");
-        if (logbackXmlUrl != null) {
-            System.setProperty("logback.configurationFile", logbackXmlUrl.toString());
-            System.out.println("[Boot] logback.configurationFile => " + logbackXmlUrl);
-        } else {
-            System.err.println("[Boot] WARNING: logback.xml not found via appCL — BasicConfigurator will be used");
-        }
-
-        // ── FIX for CHALLENGE 2 (prerequisite) ───────────────────────────────
-        // Joran's Loader.loadClass falls back to TCCL when SDK CL cannot load a
-        // class (e.g. CorrelationIdLayout).  TCCL must be appCL so the delegation
-        // chain (appCL → runtimeCL → runtime.jar) reaches the Layout/Filter.
-        Thread.currentThread().setContextClassLoader(appCL);
+        // ── Solution I — no classloader tricks ────────────────────────────────
+        // No logback.configurationFile, no TCCL juggling. RuntimeMain configures
+        // logback programmatically from the Runtime layer (which can see its own
+        // classes), registering the custom conversion word as a Supplier rather
+        // than letting logback resolve it by name across the CL boundary. All
+        // three original problems (xml discovery, class instantiation, <include>)
+        // are sidestepped because there is no Joran resource lookup at all.
 
         // ── Load and invoke RuntimeMain via reflection ─────────────────────────
-        // RuntimeMain's static Logger field triggers logback init on class load.
-        // By now: logback.configurationFile is set ✓, TCCL = appCL ✓.
+        // RuntimeMain.run() calls SupplierBasedLogbackConfig.configure() first.
         System.out.println();
         Class<?> runtimeMainClass = runtimeCL.loadClass("com.example.runtime.RuntimeMain");
         System.out.println("[Boot] RuntimeMain loaded by: " + runtimeMainClass.getClassLoader());
